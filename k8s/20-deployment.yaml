@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paylite
+  namespace: paylite
+  labels: {app: paylite}
+spec:
+  replicas: 1                      # SQLite = single writer; scale out needs PostgreSQL (see report)
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: paylite}
+  template:
+    metadata:
+      labels: {app: paylite}
+    spec:
+      automountServiceAccountToken: false     # app never talks to the K8s API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: paylite
+          image: paylite:ci
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {containerPort: 8000, name: http}
+          envFrom:
+            - secretRef: {name: paylite-secrets}
+          env:
+            - {name: APP_ENV, value: prod}
+            - {name: DB_PATH, value: /data/wallet.db}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          emptyDir: {sizeLimit: 200Mi}          # lab only; production -> PersistentVolumeClaim
+        - name: tmp
+          emptyDir: {sizeLimit: 50Mi}

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayLite · Wallet Simulator</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">P</span> PayLite <small>Wallet &amp; Gateway Simulator</small></div>
+  <nav id="nav" hidden>
+    <a href="#wallet" data-roles="customer">Wallet</a>
+    <a href="#pay" data-roles="customer">Pay</a>
+    <a href="#history" data-roles="customer merchant">History</a>
+    <a href="#merchant" data-roles="merchant">Merchant</a>
+    <a href="#admin" data-roles="admin">Audit</a>
+    <span class="who" id="who"></span>
+    <button class="ghost" id="logout">Log out</button>
+  </nav>
+</header>
+<div class="banner">SIMULATOR · no real money · amounts in ₹</div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<main>
+  <!-- 1. LOGIN / REGISTER -->
+  <section id="v-login" class="view card narrow">
+    <div class="tabs"><button class="tab on" data-tab="login">Sign in</button><button class="tab" data-tab="register">Create account</button></div>
+    <form id="f-login" autocomplete="on">
+      <label>Username<input name="username" required pattern="[A-Za-z0-9_.\-]{3,32}" autocomplete="username"></label>
+      <label>Password<input name="password" type="password" required maxlength="128" autocomplete="current-password"></label>
+      <button class="primary">Sign in</button>
+      <p class="hint">5 wrong attempts lock the account for 5 minutes.</p>
+    </form>
+    <form id="f-register" hidden>
+      <label>Username<input name="username" required pattern="[A-Za-z0-9_.\-]{3,32}" title="3-32 letters, digits, _ . -"></label>
+      <label>Password<input name="password" type="password" required minlength="10" maxlength="128" autocomplete="new-password"></label>
+      <label>I am a
+        <select name="role"><option value="customer">Customer (wallet user)</option><option value="merchant">Merchant</option></select></label>
+      <button class="primary">Create account</button>
+      <p class="hint">Minimum 10 characters. Admin accounts cannot be self-registered.</p>
+    </form>
+  </section>
+
+  <!-- 2. WALLET -->
+  <section id="v-wallet" class="view" hidden>
+    <div class="grid2">
+      <div class="card balance">
+        <p class="label">Available balance</p>
+        <p class="big" id="bal">—</p>
+        <p class="muted" id="wid"></p>
+        <button class="primary" id="mkwallet" hidden>Create my wallet</button>
+      </div>
+      <form class="card" id="f-topup">
+        <h3>Add simulated funds</h3>
+        <label>Amount (₹)<input name="amount" type="number" min="0.01" max="100000" step="0.01" required></label>
+        <button class="primary">Add funds</button>
+        <p class="hint">Max ₹1,00,000 per top-up. Request is HMAC-signed with a one-time nonce.</p>
+      </form>
+    </div>
+  </section>
+
+  <!-- 3. PAY (initiate -> confirm) -->
+  <section id="v-pay" class="view" hidden>
+    <div class="grid2">
+      <form class="card" id="f-pay">
+        <h3>Step 1 · Initiate payment</h3>
+        <label>Merchant<select name="merchant_id" id="merchants" required></select></label>
+        <label>Amount (₹)<input name="amount" type="number" min="0.01" max="50000" step="0.01" required></label>
+        <button class="primary">Review payment</button>
+        <p class="hint">A unique Idempotency-Key is attached, so a retry never charges twice.</p>
+      </form>
+      <div class="card" id="confirmbox">
+        <h3>Step 2 · Confirm</h3>
+        <p class="muted" id="pending">No pending payment.</p>
+        <div class="row"><button class="primary" id="confirm" disabled>Confirm &amp; pay</button>
+        <button class="ghost" id="cancel" disabled>Cancel</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. HISTORY -->
+  <section id="v-history" class="view card" hidden>
+    <h3>Transaction history</h3>
+    <table><thead><tr><th>#</th><th>Type</th><th>Payment</th><th class="r">Amount</th><th class="r">Balance after</th><th>Time (UTC)</th></tr></thead>
+    <tbody id="txns"></tbody></table>
+  </section>
+
+  <!-- 5. MERCHANT -->
+  <section id="v-merchant" class="view" hidden>
+    <div class="grid2">
+      <form class="card" id="f-merchant">
+        <h3>Register business</h3>
+        <label>Business name<input name="business_name" required pattern="[A-Za-z0-9 &amp;.,'\-]{2,64}"></label>
+        <label>Category<select name="category"><option>retail</option><option>food</option><option>travel</option><option>education</option><option>utilities</option><option>other</option></select></label>
+        <button class="primary">Register merchant</button>
+        <p class="muted" id="mstatus"></p>
+      </form>
+      <div class="card balance"><p class="label">Settlement balance</p><p class="big" id="mbal">—</p></div>
+    </div>
+    <div class="card">
+      <h3>Incoming payments</h3>
+      <table><thead><tr><th>Payment</th><th class="r">Amount</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody id="mpays"></tbody></table>
+    </div>
+  </section>
+
+  <!-- 6. ADMIN AUDIT -->
+  <section id="v-admin" class="view card" hidden>
+    <h3>Audit log <span id="chain" class="pill"></span></h3>
+    <table><thead><tr><th>#</th><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Hash</th></tr></thead><tbody id="audit"></tbody></table>
+  </section>
+</main>
+
+<dialog id="refundDlg">
+  <form method="dialog" id="f-refund">
+    <h3>Refund payment <span id="rpid"></span></h3>
+    <label>Reason<input name="reason" required minlength="3" maxlength="200"></label>
+    <div class="row"><button class="primary" value="ok">Issue refund</button><button class="ghost" value="cancel" formnovalidate>Cancel</button></div>
+  </form>
+</dialog>
+<script src="/ui/app.js"></script>
+</body>
+</html>
