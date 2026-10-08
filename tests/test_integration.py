@@ -131,3 +131,12 @@ def test_audit_chain_valid_after_activity(api):
     admin = api.login("admin_test", "Admin-Test-Pass-1")
     body = admin.get("/api/admin/audit").json()
     assert body["verification"]["valid"] is True and body["verification"]["entries"] > 10
+
+
+def test_huge_ids_rejected_not_500(api):
+    """DEF-06 regression (found by fuzzing): IDs beyond SQLite INTEGER range must give 422, not 500."""
+    c = api.new_customer(unique("big"), funds=1000)
+    r = c.signed_post("/api/payments", {"merchant_id": 2**70, "amount": 100}, extra=idem())
+    assert r.status_code == 422
+    r = c.signed_post(f"/api/payments/{2**70}/confirm")
+    assert r.status_code == 422

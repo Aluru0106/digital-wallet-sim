@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -65,7 +65,9 @@ async def unhandled(req: Request, exc: Exception):
 
 
 # ---------------- schemas (input validation) ----------------
+MAX_ID = 2**31 - 1
 Username = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]{3,32}$")]
+PaymentId = Annotated[int, Path(gt=0, le=MAX_ID)]
 Amount = Annotated[int, Field(strict=True, gt=0, le=services.MAX_TOPUP)]
 IdemKey = Annotated[str, Header(alias="Idempotency-Key", pattern=r"^[A-Za-z0-9-]{16,64}$")]
 
@@ -91,7 +93,7 @@ class MerchantIn(BaseModel):
 
 
 class PaymentIn(BaseModel):
-    merchant_id: int = Field(strict=True, gt=0)
+    merchant_id: int = Field(strict=True, gt=0, le=MAX_ID)   # DEF-06: bound IDs to SQLite INTEGER range
     amount: Amount
 
 
@@ -214,7 +216,7 @@ def initiate(body: PaymentIn, idem: IdemKey, user: Annotated[dict, Depends(signe
 
 
 @app.post("/api/payments/{payment_id}/confirm")
-def confirm(payment_id: int, user: Annotated[dict, Depends(signed_request)]):
+def confirm(payment_id: PaymentId, user: Annotated[dict, Depends(signed_request)]):
     if user["role"] != "customer":
         raise HTTPException(403, "forbidden")
     res = services.confirm_payment(user["user_id"], payment_id)
@@ -223,7 +225,7 @@ def confirm(payment_id: int, user: Annotated[dict, Depends(signed_request)]):
 
 
 @app.post("/api/payments/{payment_id}/refund")
-def refund(payment_id: int, body: RefundIn, user: Annotated[dict, Depends(signed_request)]):
+def refund(payment_id: PaymentId, body: RefundIn, user: Annotated[dict, Depends(signed_request)]):
     if user["role"] not in ("merchant", "admin"):
         raise HTTPException(403, "forbidden")
     res = services.refund_payment(user["user_id"], user["role"], payment_id, body.reason)

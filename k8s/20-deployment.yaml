@@ -36,8 +36,8 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
           resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: 500m, memory: 256Mi}
+            requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi, ephemeral-storage: 256Mi}
           readinessProbe:
             httpGet: {path: /health, port: http}
             initialDelaySeconds: 3
