@@ -3,8 +3,18 @@
 let S = null; let pending = null;
 const $ = (s) => document.querySelector(s);
 const inr = (p) => "₹" + (p / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 });
-const toPaise = (v) => Math.round(parseFloat(v) * 100);
-const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const toPaise = (v) => Math.round(Number.parseFloat(v) * 100);
+
+
+// Safe DOM builders (no innerHTML with data) - fixes Sonar "DOM XSS via unsanitized user input"
+function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = String(text); if (cls) n.className = cls; return n; }
+function row(cells) { const tr = document.createElement("tr"); cells.forEach((c) => tr.appendChild(c instanceof Node ? c : el("td", c))); return tr; }
+function fill(tbody, rows, emptyText, cols) {
+  tbody.replaceChildren();
+  if (!rows.length) { const td = el("td", emptyText, "muted"); td.colSpan = cols; tbody.appendChild(row([td])); return; }
+  rows.forEach((r) => tbody.appendChild(r));
+}
+function tdWith(child, cls) { const td = el("td", undefined, cls); td.appendChild(child); return td; }
 
 function toast(msg, kind = "") { const t = $("#toast"); t.textContent = msg; t.className = kind; t.hidden = false; clearTimeout(t._h); t._h = setTimeout(() => (t.hidden = true), 4000); }
 
@@ -44,13 +54,13 @@ function route() {
   $("#nav").hidden = !S;
   document.querySelectorAll("#nav a").forEach((a) => { a.hidden = !S || !a.dataset.roles.split(" ").includes(S.role); a.classList.toggle("on", a.getAttribute("href") === h); });
   if (location.hash !== h) history.replaceState(null, "", h);
-    // explicit allow-list instead of calling obj[userControlledKey]() (CodeQL js/unvalidated-dynamic-method-call)
+  // explicit allow-list instead of calling obj[userControlledKey]() (CodeQL js/unvalidated-dynamic-method-call)
   switch (h) {
-    case "#wallet": loadWallet(); break;
-    case "#pay": loadPay(); break;
-    case "#history": loadHistory(); break;
-    case "#merchant": loadMerchant(); break;
-    case "#admin": loadAudit(); break;
+    case "#wallet": void loadWallet(); break;
+    case "#pay": void loadPay(); break;
+    case "#history": void loadHistory(); break;
+    case "#merchant": void loadMerchant(); break;
+    case "#admin": void loadAudit(); break;
     default: break;
   }
 }
@@ -59,7 +69,7 @@ function logout() {
   // DEF-03 fix: wipe every form, table and balance so the next user of a shared device sees nothing of the previous one
   S = null; pending = null;
   document.querySelectorAll("form").forEach((f) => f.reset());
-  ["#txns", "#mpays", "#audit"].forEach((id) => ($(id).innerHTML = ""));
+  ["#txns", "#mpays", "#audit"].forEach((id) => $(id).replaceChildren());
   ["#bal", "#mbal", "#wid", "#who", "#mstatus"].forEach((id) => ($(id).textContent = ""));
   route();
 }
@@ -89,17 +99,19 @@ async function loadWallet() {
   try { const w = await api("/api/wallets/me"); $("#bal").textContent = inr(w.balance); $("#wid").textContent = "Wallet #" + w.wallet_id + " · " + w.currency; $("#mkwallet").hidden = true; $("#f-topup").hidden = false; }
   catch { $("#bal").textContent = "No wallet yet"; $("#wid").textContent = ""; $("#mkwallet").hidden = false; $("#f-topup").hidden = true; }
 }
-$("#mkwallet").onclick = async () => { try { await api("/api/wallets", { method: "POST" }); toast("Wallet created", "ok"); loadWallet(); } catch (e) { toast(e.message, "err"); } };
+$("#mkwallet").onclick = async () => { try { await api("/api/wallets", { method: "POST" }); toast("Wallet created", "ok"); await loadWallet(); } catch (e) { toast(e.message, "err"); } };
 $("#f-topup").onsubmit = async (e) => {
   e.preventDefault(); const btn = e.submitter; btn.disabled = true;
-  try { const r = await api("/api/wallets/topup", { method: "POST", signed: true, body: { amount: toPaise(e.target.amount.value) } }); toast("Added. New balance " + inr(r.balance), "ok"); e.target.reset(); loadWallet(); }
+  try { const r = await api("/api/wallets/topup", { method: "POST", signed: true, body: { amount: toPaise(e.target.amount.value) } }); toast("Added. New balance " + inr(r.balance), "ok"); e.target.reset(); await loadWallet(); }
   catch (err) { toast(err.message, "err"); } finally { btn.disabled = false; }
 };
 
 // ---------- pay ----------
 async function loadPay() {
   const ms = await api("/api/merchants").catch(() => []);
-  $("#merchants").innerHTML = ms.length ? ms.map((m) => `<option value="${m.merchant_id}">${esc(m.business_name)} (${esc(m.category)})</option>`).join("") : "<option value=''>No merchants yet</option>";
+  const sel = $("#merchants"); sel.replaceChildren();
+  if (!ms.length) { const o = el("option", "No merchants yet"); o.value = ""; sel.appendChild(o); }
+  ms.forEach((m) => { const o = el("option", `${m.business_name} (${m.category})`); o.value = String(m.merchant_id); sel.appendChild(o); });
   showPending();
 }
 function showPending() {
@@ -108,7 +120,7 @@ function showPending() {
 }
 $("#f-pay").onsubmit = async (e) => {
   e.preventDefault(); const sel = $("#merchants");
-  const body = { merchant_id: parseInt(sel.value, 10), amount: toPaise(e.target.amount.value) };
+  const body = { merchant_id: Number.parseInt(sel.value, 10), amount: toPaise(e.target.amount.value) };
   try {
     const r = await api("/api/payments", { method: "POST", signed: true, body, headers: { "Idempotency-Key": crypto.randomUUID() } });
     pending = { id: r.payment_id, amount: r.amount, merchant: sel.options[sel.selectedIndex].text }; showPending();
@@ -125,25 +137,33 @@ $("#cancel").onclick = () => { pending = null; showPending(); toast("Payment not
 // ---------- history ----------
 async function loadHistory() {
   try { const t = await api("/api/transactions");
-    $("#txns").innerHTML = t.length ? t.map((x) => `<tr><td>${x.txn_id}</td><td><span class="st">${esc(x.txn_type)}</span></td><td>${x.payment_id ?? "—"}</td><td class="r">${/DEBIT/.test(x.txn_type) ? "−" : "+"}${inr(x.amount)}</td><td class="r">${inr(x.balance_after)}</td><td class="mono">${esc(x.created_at)}</td></tr>`).join("") : "<tr><td colspan=6 class=muted>No transactions yet</td></tr>";
-  } catch (e) { $("#txns").innerHTML = `<tr><td colspan=6 class=muted>${esc(e.message)}</td></tr>`; }
+    fill($("#txns"), t.map((x) => row([String(x.txn_id), tdWith(el("span", x.txn_type, "st")), String(x.payment_id ?? "—"),
+      el("td", (/DEBIT/.test(x.txn_type) ? "−" : "+") + inr(x.amount), "r"), el("td", inr(x.balance_after), "r"), el("td", x.created_at, "mono")])), "No transactions yet", 6);
+  } catch (e) { fill($("#txns"), [], e.message, 6); }
 }
 
 // ---------- merchant ----------
 async function loadMerchant() {
   try { const w = await api("/api/wallets/me"); $("#mbal").textContent = inr(w.balance); $("#f-merchant").hidden = true; } catch { $("#mbal").textContent = "—"; $("#mstatus").textContent = "Register your business to receive payments."; $("#f-merchant").hidden = false; }
   const ps = await api("/api/merchant/payments").catch(() => []);
-  $("#mpays").innerHTML = ps.length ? ps.map((p) => `<tr><td>#${p.payment_id}</td><td class="r">${inr(p.amount)}</td><td><span class="st ${esc(p.status)}">${esc(p.status)}</span></td><td class="mono">${esc(p.created_at)}</td><td>${p.status === "CONFIRMED" ? `<button class="ghost" data-refund="${p.payment_id}">Refund</button>` : ""}</td></tr>`).join("") : "<tr><td colspan=5 class=muted>No payments yet</td></tr>";
-  document.querySelectorAll("[data-refund]").forEach((b) => (b.onclick = () => { $("#rpid").textContent = "#" + b.dataset.refund; $("#refundDlg").dataset.pid = b.dataset.refund; $("#refundDlg").showModal(); }));
+  fill($("#mpays"), ps.map((p) => {
+    const action = el("td");
+    if (p.status === "CONFIRMED") {
+      const b = el("button", "Refund", "ghost"); b.dataset.refund = String(p.payment_id);
+      b.onclick = () => { $("#rpid").textContent = "#" + p.payment_id; $("#refundDlg").dataset.pid = String(p.payment_id); $("#refundDlg").showModal(); };
+      action.appendChild(b);
+    }
+    return row(["#" + p.payment_id, el("td", inr(p.amount), "r"), tdWith(el("span", p.status, "st " + p.status)), el("td", p.created_at, "mono"), action]);
+  }), "No payments yet", 5);
 }
 $("#f-merchant").onsubmit = async (e) => {
   e.preventDefault();
-  try { const r = await api("/api/merchants", { method: "POST", body: Object.fromEntries(new FormData(e.target)) }); toast("Merchant #" + r.merchant_id + " registered", "ok"); e.target.reset(); loadMerchant(); }
+  try { const r = await api("/api/merchants", { method: "POST", body: Object.fromEntries(new FormData(e.target)) }); toast("Merchant #" + r.merchant_id + " registered", "ok"); e.target.reset(); await loadMerchant(); }
   catch (err) { toast(err.message, "err"); }
 };
 $("#refundDlg").addEventListener("close", async () => {
   const d = $("#refundDlg"); if (d.returnValue !== "ok") return;
-  try { await api(`/api/payments/${d.dataset.pid}/refund`, { method: "POST", signed: true, body: { reason: $("#f-refund").reason.value } }); toast("Refund issued", "ok"); $("#f-refund").reset(); loadMerchant(); }
+  try { await api(`/api/payments/${d.dataset.pid}/refund`, { method: "POST", signed: true, body: { reason: $("#f-refund").reason.value } }); toast("Refund issued", "ok"); $("#f-refund").reset(); await loadMerchant(); }
   catch (err) { toast(err.message, "err"); }
 });
 
@@ -151,7 +171,7 @@ $("#refundDlg").addEventListener("close", async () => {
 async function loadAudit() {
   try { const a = await api("/api/admin/audit"); const v = a.verification;
     $("#chain").textContent = v.valid ? `hash chain valid · ${v.entries} entries` : `TAMPERED at #${v.broken_at}`; $("#chain").className = "pill " + (v.valid ? "ok" : "bad");
-    $("#audit").innerHTML = a.entries.slice().reverse().map((x) => `<tr><td>${x.audit_id}</td><td class="mono">${esc(x.ts.slice(0, 19))}</td><td>${x.actor_id ?? "system"}</td><td>${esc(x.action)}</td><td>${esc(x.entity)}</td><td class="mono">${esc(x.entry_hash.slice(0, 12))}…</td></tr>`).join("");
+    fill($("#audit"), a.entries.slice().reverse().map((x) => row([String(x.audit_id), el("td", x.ts.slice(0, 19), "mono"), String(x.actor_id ?? "system"), x.action, x.entity, el("td", x.entry_hash.slice(0, 12) + "…", "mono")])), "No entries", 6);
   } catch (e) { toast(e.message, "err"); }
 }
 route();
