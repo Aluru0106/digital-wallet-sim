@@ -165,7 +165,7 @@ jobs:
 
       - name: System / end-to-end tests against the deployed service
         run: |
-          pip install -q requests pytest
+          pip install -q -r requirements-dev.txt
           kubectl -n paylite port-forward svc/paylite 8080:80 > /tmp/pf.log 2>&1 &
           for i in $(seq 1 20); do curl -fsS localhost:8080/health && break; sleep 1; done
           BASE_URL=http://127.0.0.1:8080 pytest tests/system -v
