@@ -44,7 +44,15 @@ function route() {
   $("#nav").hidden = !S;
   document.querySelectorAll("#nav a").forEach((a) => { a.hidden = !S || !a.dataset.roles.split(" ").includes(S.role); a.classList.toggle("on", a.getAttribute("href") === h); });
   if (location.hash !== h) history.replaceState(null, "", h);
-  ({ "#wallet": loadWallet, "#pay": loadPay, "#history": loadHistory, "#merchant": loadMerchant, "#admin": loadAudit }[h] || (() => {}))();
+    // explicit allow-list instead of calling obj[userControlledKey]() (CodeQL js/unvalidated-dynamic-method-call)
+  switch (h) {
+    case "#wallet": loadWallet(); break;
+    case "#pay": loadPay(); break;
+    case "#history": loadHistory(); break;
+    case "#merchant": loadMerchant(); break;
+    case "#admin": loadAudit(); break;
+    default: break;
+  }
 }
 window.addEventListener("hashchange", route);
 function logout() {
