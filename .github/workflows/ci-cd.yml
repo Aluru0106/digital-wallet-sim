@@ -1,0 +1,181 @@
+name: CI-CD (secure pipeline)
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read            # least privilege by default; jobs widen only what they need
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- 1. BUILD + TEST + STATIC/SECURITY CHECKS
+  build-test:
+    name: Build, test & security checks
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+
+      - name: Install pinned dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Secret scan (gitleaks) - fail if credentials are committed
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: SAST - Bandit on application code (gate on Medium+)
+        run: |
+          mkdir -p reports
+          bandit -r app -f json -o reports/bandit-app.json || true
+          bandit -r app -ll
+
+      - name: SAST - Bandit on legacy v1 (report only, 'before' evidence)
+        continue-on-error: true
+        run: bandit -r legacy -f txt | tee reports/bandit-legacy.txt
+
+      - name: Dependency vulnerability scan (pip-audit)
+        run: pip-audit -r requirements.txt
+
+      - name: Unit + integration + fuzz tests with coverage
+        run: pytest tests --ignore=tests/system --cov=app --cov-report=xml --cov-report=term --junitxml=reports/junit.xml
+
+      - name: Defect DEF-01 reproduction (v1 race) vs fix (v2)
+        run: python -m scripts.demo_v1_defects | grep -v '^{' | tee reports/defect-def01.txt
+
+      - name: Derive SonarCloud keys
+        if: env.SONAR_TOKEN != ''
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "SONAR_ORG=$owner" >> "$GITHUB_ENV"
+          echo "SONAR_KEY=${GITHUB_REPOSITORY_OWNER}_${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
+
+      - name: SonarCloud static analysis (quality gate)
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.organization=${{ env.SONAR_ORG }}
+            -Dsonar.projectKey=${{ env.SONAR_KEY }}
+
+      - name: Upload test & security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            reports/
+            coverage.xml
+
+  # ---------------------------------------------------------------- 2. CONTAINER BUILD + IMAGE SCAN + PACKAGE
+  container:
+    name: Docker build, scan & package
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # only this job may push to GitHub Container Registry
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t paylite:ci .
+
+      - name: Image vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: paylite:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+          format: table
+
+      - name: Container smoke test (non-root, health)
+        run: |
+          docker run -d --name app -p 8000:8000 --read-only --tmpfs /data:uid=10001,gid=10001 --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -e JWT_SECRET="$(openssl rand -base64 48)" -e HMAC_SECRET="$(openssl rand -base64 48)" paylite:ci
+          for i in $(seq 1 20); do curl -fsS localhost:8000/health && break; sleep 1; done
+          echo "Container user: $(docker exec app id)"
+          docker exec app id -u | grep -qx 10001
+          docker logs app | tail -5
+          docker rm -f app
+
+      - name: Push image to GHCR (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMG=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/paylite
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag paylite:ci $IMG:${GITHUB_SHA::7}
+          docker tag paylite:ci $IMG:latest
+          docker push $IMG:${GITHUB_SHA::7}
+          docker push $IMG:latest
+          docker inspect --format='{{index .RepoDigests 0}}' $IMG:latest | tee image-digest.txt
+
+  # ---------------------------------------------------------------- 3. DEPLOY TO KUBERNETES (MINIKUBE) + SYSTEM TEST
+  deploy:
+    name: Deploy to Minikube & system test
+    needs: container
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Minikube
+        uses: medyagh/setup-minikube@latest
+
+      - name: Build image into the cluster
+        run: |
+          docker build -t paylite:ci .
+          minikube image load paylite:ci
+
+      - name: Namespace + Secret (generated at deploy time, never stored in git)
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml
+          ADMIN_PW="$(openssl rand -base64 18)"
+          echo "::add-mask::$ADMIN_PW"
+          kubectl -n paylite create secret generic paylite-secrets \
+            --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
+            --from-literal=HMAC_SECRET="$(openssl rand -base64 48)" \
+            --from-literal=ADMIN_USERNAME=admin \
+            --from-literal=ADMIN_PASSWORD="$ADMIN_PW"
+
+      - name: Deploy manifests
+        run: |
+          kubectl apply -f k8s/20-deployment.yaml -f k8s/30-service.yaml -f k8s/40-networkpolicy.yaml
+          kubectl -n paylite rollout status deployment/paylite --timeout=180s
+
+      - name: Deployment evidence
+        run: |
+          kubectl -n paylite get all -o wide
+          kubectl -n paylite get pod -l app=paylite -o jsonpath='{.items[0].spec.securityContext}{"\n"}{.items[0].spec.containers[0].securityContext}{"\n"}{.items[0].spec.containers[0].resources}{"\n"}'
+          kubectl get ns paylite --show-labels
+
+      - name: System / end-to-end tests against the deployed service
+        run: |
+          pip install -q requests pytest
+          kubectl -n paylite port-forward svc/paylite 8080:80 > /tmp/pf.log 2>&1 &
+          for i in $(seq 1 20); do curl -fsS localhost:8080/health && break; sleep 1; done
+          BASE_URL=http://127.0.0.1:8080 pytest tests/system -v
+
+      - name: Security logs & metrics from the running pod
+        if: always()
+        run: |
+          kubectl -n paylite logs deployment/paylite | grep '"event"' | tail -20 || true
+          curl -s localhost:8080/metrics || true
