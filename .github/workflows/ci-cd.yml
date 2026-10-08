@@ -98,13 +98,9 @@ jobs:
         run: docker build -t paylite:ci .
 
       - name: Image vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: paylite:ci
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "0"
-          format: table
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --format table paylite:ci
 
       - name: Container smoke test (non-root, health)
         run: |
